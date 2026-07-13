@@ -3,7 +3,7 @@
 ## 基本信息
 
 - 程序名称：Bilicraft Handheld Stocks（股市面板）
-- 当前版本：0.1.5
+- 当前版本：0.1.6
 - 程序类型：Bilicraft Handheld 外部插件
 - 运行平台：Android / Bilicraft Handheld
 - 插件入口：`com.bilicraft.handheld.stockplugin.StockMarketPlugin`

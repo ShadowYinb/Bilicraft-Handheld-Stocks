@@ -86,7 +86,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.1.5",
+        version = "0.1.6",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -735,8 +735,12 @@ private fun TradePanel(
                 OutlinedButton(onClick = onPortfolio, enabled = !portfolioLoading) { Text(if (portfolioLoading) "查询中" else "持股") }
             }
             if (holdings.isNotEmpty()) {
+                val totalShares = holdings.sumOf { it.shares }
+                val totalHoldingValue = holdings.sumOf { it.totalValue }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    holdings.take(6).forEach { holding ->
+                    Text("持股汇总", style = MaterialTheme.typography.titleSmall)
+                    Text("总计：$totalShares 股 · ${"%.2f".format(totalHoldingValue)} 帕元")
+                    holdings.forEach { holding ->
                         Text("${holding.companyName}: ${holding.shares} 股 · ${"%.2f".format(holding.totalValue)}")
                     }
                 }
