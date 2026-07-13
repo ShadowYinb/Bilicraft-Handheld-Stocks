@@ -1,0 +1,119 @@
+name: Release Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release .bhplugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build .bhplugin
+        run: |
+          gradle --no-daemon clean packageBhPlugin
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PLUGIN_FILE="$(ls build/outputs/bhplugin/*.bhplugin | head -n 1)"
+          PLUGIN_NAME="$(basename "$PLUGIN_FILE")"
+
+          unzip -t "$PLUGIN_FILE"
+          unzip -p "$PLUGIN_FILE" plugin.json > plugin.json
+
+          SHA256="$(sha256sum "$PLUGIN_FILE" | awk '{print $1}')"
+          SIZE="$(wc -c < "$PLUGIN_FILE" | tr -d ' ')"
+
+          echo "$SHA256  $PLUGIN_NAME" > "$PLUGIN_FILE.sha256"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v0.1.5"
+          fi
+
+          VERSION="${TAG#v}"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${PLUGIN_NAME}"
+
+          cat > official-market-entry.json <<JSON
+          {
+            "id": "stock-market-dashboard",
+            "name": "股市面板",
+            "summary": "帕拉伦股市行情、K 线分析、资金持股查询和股票交易面板。",
+            "description": "为 Bilicraft Handheld 制作的外部 Compose 插件，整合帕拉伦股市行情、多周期 K 线、玩家资金、持股查询以及买入卖出操作。",
+            "repo": "https://github.com/${GITHUB_REPOSITORY}",
+            "author": "ShadowYinb",
+            "category": "gameplay",
+            "latestVersion": "${VERSION}",
+            "minAppVersion": "0.2.0",
+            "minApiVersion": 1,
+            "permissions": [
+              "network"
+            ],
+            "releases": [
+              {
+                "version": "${VERSION}",
+                "downloadUrl": "${DOWNLOAD_URL}",
+                "sha256": "${SHA256}",
+                "size": ${SIZE},
+                "changelog": "发布股市面板插件 ${VERSION}。"
+              }
+            ]
+          }
+          JSON
+
+          echo "PLUGIN_FILE=$PLUGIN_FILE" >> "$GITHUB_ENV"
+          echo "PLUGIN_NAME=$PLUGIN_NAME" >> "$GITHUB_ENV"
+          echo "PLUGIN_SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "PLUGIN_SIZE=$SIZE" >> "$GITHUB_ENV"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bhplugin-package
+          path: |
+            build/outputs/bhplugin/*.bhplugin
+            build/outputs/bhplugin/*.sha256
+            plugin.json
+            official-market-entry.json
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/outputs/bhplugin/*.bhplugin
+            build/outputs/bhplugin/*.sha256
+            plugin.json
+            official-market-entry.json
+          generate_release_notes: true
