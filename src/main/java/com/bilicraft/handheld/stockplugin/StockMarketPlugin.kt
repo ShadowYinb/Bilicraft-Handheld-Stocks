@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,9 +42,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -86,7 +87,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.1.6",
+        version = "0.1.7",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -124,6 +125,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     var state by remember { mutableStateOf(StockUiState(loading = true)) }
     var action by remember { mutableStateOf("buy") }
     var amount by remember { mutableStateOf("") }
+    var chartViewport by remember { mutableStateOf(ChartViewport()) }
     val pageScrollState = rememberScrollState()
 
     fun selectedCompany(): StockCompany? = state.companies.firstOrNull { it.id == state.selectedCompanyId }
@@ -141,8 +143,15 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     fun reloadKline() {
         scope.launch {
             val companyId = state.selectedCompanyId ?: return@launch
-            runCatching { repository.fetchKline(companyId, state.selectedInterval) }
-                .onSuccess { data -> state = state.copy(loading = false, kline = data, lastError = null) }
+            runCatching { repository.fetchChartData(companyId, state.selectedInterval) }
+                .onSuccess { data ->
+                    state = state.copy(
+                        loading = false,
+                        kline = data.kline,
+                        availableShares = data.availableShares,
+                        lastError = null
+                    )
+                }
                 .onFailure { error -> state = state.copy(loading = false, lastError = error.message ?: "K线加载失败") }
         }
     }
@@ -156,9 +165,10 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     ?.takeIf { id -> companies.any { it.id == id } }
                     ?: companies.firstOrNull { it.latestPrice != 0.0 }?.id
                     ?: companies.firstOrNull()?.id
-                val kline = selected?.let { repository.fetchKline(it, state.selectedInterval) }.orEmpty()
-                Triple(companies, kline, repository.fetchHealth())
-            }.onSuccess { (companies, kline, health) ->
+                val chartData = selected?.let { repository.fetchChartData(it, state.selectedInterval) }
+                    ?: StockMarketChartData(emptyList(), emptyList())
+                Triple(companies, chartData, repository.fetchHealth())
+            }.onSuccess { (companies, chartData, health) ->
                 val selectedId = state.selectedCompanyId?.takeIf { id -> companies.any { it.id == id } }
                     ?: companies.firstOrNull { it.latestPrice != 0.0 }?.id
                     ?: companies.firstOrNull()?.id
@@ -167,7 +177,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     loading = false,
                     companies = companies,
                     selectedCompanyId = selectedId,
-                    kline = kline,
+                    kline = chartData.kline,
+                    availableShares = chartData.availableShares,
                     health = health,
                     mappedServerId = gateway.mappings.value.firstOrNull { it.companyName == selectedName }?.serverId,
                     liveInfo = state.liveInfo?.takeIf { it.name == selectedName }
@@ -198,6 +209,10 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 .onSuccess { holdings -> state = state.copy(portfolioLoading = false, holdings = holdings) }
                 .onFailure { state = state.copy(portfolioLoading = false) }
         }
+    }
+
+    LaunchedEffect(state.selectedCompanyId, state.selectedInterval) {
+        chartViewport = ChartViewport()
     }
 
     BackHandler(onBack = onClose)
@@ -257,9 +272,21 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
             )
             CandleChart(
                 points = state.kline,
+                availableShares = state.availableShares,
+                interval = state.selectedInterval,
                 viewportKey = "${state.selectedCompanyId}:${state.selectedInterval}",
+                viewport = chartViewport,
+                onViewportChange = { chartViewport = it },
                 pageScrollState = pageScrollState,
                 modifier = Modifier.fillMaxWidth().height(330.dp)
+            )
+            AvailableSharesChart(
+                kline = state.kline,
+                points = state.availableShares,
+                viewportKey = "${state.selectedCompanyId}:${state.selectedInterval}",
+                viewport = chartViewport,
+                onViewportChange = { chartViewport = it },
+                modifier = Modifier.fillMaxWidth().height(150.dp)
             )
             TradePanel(
                 action = action,
@@ -480,21 +507,47 @@ private fun IntervalPicker(selected: String, onSelect: (String) -> Unit) {
 @Composable
 private fun CandleChart(
     points: List<StockKlinePoint>,
+    availableShares: List<StockAvailableSharesPoint>,
+    interval: String,
     viewportKey: String,
+    viewport: ChartViewport,
+    onViewportChange: (ChartViewport) -> Unit,
     pageScrollState: androidx.compose.foundation.ScrollState,
     modifier: Modifier = Modifier
 ) {
-    var zoom by remember(viewportKey) { mutableFloatStateOf(1f) }
-    var pan by remember(viewportKey) { mutableFloatStateOf(0f) }
     var showCloseLine by remember(viewportKey) { mutableStateOf(true) }
-    var crosshair by remember(viewportKey) { mutableStateOf<Offset?>(null) }
+    var showCandles by remember(viewportKey) { mutableStateOf(true) }
+    var showTradeMarkers by remember(viewportKey) { mutableStateOf(true) }
+    val latestViewport = rememberUpdatedState(viewport)
 
     Card(colors = CardDefaults.cardColors(containerColor = PANEL_BG), modifier = modifier) {
         Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("K 线", fontWeight = FontWeight.Bold)
-                OutlinedButton(onClick = { showCloseLine = !showCloseLine }) {
-                    Text(if (showCloseLine) "隐藏折线" else "显示折线")
+            Text("K 线", fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedButton(
+                    onClick = { showCloseLine = !showCloseLine },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    Text(if (showCloseLine) "隐藏折线" else "显示折线", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = { showCandles = !showCandles },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    Text(if (showCandles) "隐藏K线" else "显示K线", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = { showTradeMarkers = !showTradeMarkers },
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    Text(
+                        if (showTradeMarkers) "隐藏售出/回购" else "显示售出/回购",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1
+                    )
                 }
             }
             if (points.isEmpty()) {
@@ -508,6 +561,7 @@ private fun CandleChart(
                         .pointerInput(viewportKey, points.size) {
                             awaitEachGesture {
                                 awaitFirstDown(requireUnconsumed = false)
+                                var gestureViewport = latestViewport.value
                                 var totalMovement = Offset.Zero
                                 var lastPosition = Offset.Zero
                                 var transformed = false
@@ -520,24 +574,36 @@ private fun CandleChart(
                                     if (event.changes.size > 1 || abs(zoomChange - 1f) > 0.01f) transformed = true
 
                                     if (event.changes.size > 1) {
-                                        val nextZoom = (zoom * zoomChange).coerceIn(1f, max(1f, points.size / 5f))
+                                        val nextZoom = (gestureViewport.zoom * zoomChange).coerceIn(1f, max(1f, points.size / 5f))
                                         val visibleCount = (points.size / nextZoom).coerceAtLeast(2f)
                                         val maxPan = (points.size - visibleCount).coerceAtLeast(0f) / 2f
-                                        zoom = nextZoom
-                                        pan = (pan - panChange.x * visibleCount / size.width.coerceAtLeast(1)).coerceIn(-maxPan, maxPan)
+                                        gestureViewport = gestureViewport.copy(
+                                            zoom = nextZoom,
+                                            pan = (gestureViewport.pan - panChange.x * visibleCount / size.width.coerceAtLeast(1)).coerceIn(-maxPan, maxPan),
+                                            selectedIndex = null
+                                        )
+                                        onViewportChange(gestureViewport)
                                         event.changes.forEach { it.consume() }
                                     } else if (abs(panChange.x) > abs(panChange.y)) {
-                                        val visibleCount = (points.size / zoom).coerceAtLeast(2f)
+                                        val visibleCount = (points.size / gestureViewport.zoom).coerceAtLeast(2f)
                                         val maxPan = (points.size - visibleCount).coerceAtLeast(0f) / 2f
-                                        pan = (pan - panChange.x * visibleCount / size.width.coerceAtLeast(1)).coerceIn(-maxPan, maxPan)
+                                        gestureViewport = gestureViewport.copy(
+                                            pan = (gestureViewport.pan - panChange.x * visibleCount / size.width.coerceAtLeast(1)).coerceIn(-maxPan, maxPan),
+                                            selectedIndex = null
+                                        )
+                                        onViewportChange(gestureViewport)
                                         event.changes.forEach { if (it.positionChanged()) it.consume() }
                                     }
                                 } while (event.changes.any { it.pressed })
 
                                 if (!transformed && totalMovement.getDistance() < viewConfiguration.touchSlop) {
-                                    crosshair = lastPosition
-                                } else if (totalMovement.getDistance() >= viewConfiguration.touchSlop) {
-                                    crosshair = null
+                                    val plotRight = (size.width - 62.dp.toPx()).coerceAtLeast(7.dp.toPx())
+                                    val range = chartVisibleRange(points.size, gestureViewport.zoom, gestureViewport.pan)
+                                    val count = range.count()
+                                    val localIndex = if (count <= 1) 0 else
+                                        (((lastPosition.x - 6.dp.toPx()) / (plotRight - 6.dp.toPx())) * (count - 1))
+                                            .toInt().coerceIn(0, count - 1)
+                                    onViewportChange(gestureViewport.copy(selectedIndex = range.first + localIndex))
                                 }
                             }
                         }
@@ -551,10 +617,9 @@ private fun CandleChart(
                     val plotWidth = plotRight - plotLeft
                     val plotHeight = plotBottom - plotTop
 
-                    val visibleCount = ceil(points.size / zoom).toInt().coerceIn(2.coerceAtMost(points.size), points.size)
-                    val center = ((points.lastIndex / 2f) + pan)
-                        .coerceIn((visibleCount - 1) / 2f, points.lastIndex - (visibleCount - 1) / 2f)
-                    val start = floor(center - (visibleCount - 1) / 2f).toInt().coerceIn(0, points.size - visibleCount)
+                    val range = chartVisibleRange(points.size, viewport.zoom, viewport.pan)
+                    val visibleCount = range.count()
+                    val start = range.first
                     val visible = points.subList(start, start + visibleCount)
 
                     val rawMin = visible.minOf { min(it.low, min(it.open, it.close)) }
@@ -611,23 +676,47 @@ private fun CandleChart(
                         drawPath(closePath, Color(0xFF58A6FF), style = Stroke(width = 2.dp.toPx()))
                     }
 
-                    val candleWidth = (stepX * 0.55f).coerceIn(2.dp.toPx(), 10.dp.toPx())
-                    visible.forEachIndexed { index, point ->
-                        val x = plotLeft + index * stepX
-                        val color = if (point.close >= point.open) STOCK_UP else STOCK_DOWN
-                        drawLine(color, Offset(x, priceY(point.high)), Offset(x, priceY(point.low)), strokeWidth = 1.dp.toPx())
-                        drawLine(color, Offset(x, priceY(point.open)), Offset(x, priceY(point.close)), strokeWidth = candleWidth)
+                    if (showCandles) {
+                        val candleWidth = (stepX * 0.55f).coerceIn(2.dp.toPx(), 10.dp.toPx())
+                        visible.forEachIndexed { index, point ->
+                            val x = plotLeft + index * stepX
+                            val color = if (point.close >= point.open) STOCK_UP else STOCK_DOWN
+                            drawLine(color, Offset(x, priceY(point.high)), Offset(x, priceY(point.low)), strokeWidth = 1.dp.toPx())
+                            drawLine(color, Offset(x, priceY(point.open)), Offset(x, priceY(point.close)), strokeWidth = candleWidth)
+                        }
                     }
 
-                    crosshair?.let { tap ->
-                        val x = tap.x.coerceIn(plotLeft, plotRight)
-                        val y = tap.y.coerceIn(plotTop, plotBottom)
-                        val index = if (visible.size <= 1) 0 else ((x - plotLeft) / stepX).toInt().coerceIn(0, visible.lastIndex)
+                    if (showTradeMarkers && interval == "15m") {
+                        buildTradeMarkers(points, availableShares).forEachIndexed { markerIndex, marker ->
+                            if (marker.pointIndex !in range) return@forEachIndexed
+                            val localIndex = marker.pointIndex - start
+                            val x = plotLeft + localIndex * stepX
+                            val y = priceY(points[marker.pointIndex].close)
+                            val color = if (marker.isBuyback) Color(0xFF58A6FF) else Color(0xFFFF4D4F)
+                            drawCircle(color, radius = 4.dp.toPx(), center = Offset(x, y))
+                            val text = "${if (marker.isBuyback) "回购" else "售出"}${marker.shares}股"
+                            val markerPaint = android.graphics.Paint(labelPaint).apply {
+                                this.color = if (marker.isBuyback) android.graphics.Color.rgb(121, 192, 255)
+                                else android.graphics.Color.rgb(255, 123, 114)
+                                textSize = 9.dp.toPx()
+                            }
+                            val textWidth = markerPaint.measureText(text)
+                            val labelX = (x - textWidth / 2f).coerceIn(plotLeft, plotRight - textWidth)
+                            val offset = (12 + (markerIndex % 2) * 12).dp.toPx()
+                            val labelY = if (marker.isBuyback) (y + offset).coerceAtMost(plotBottom - 2.dp.toPx())
+                            else (y - offset).coerceAtLeast(plotTop + markerPaint.textSize)
+                            drawContext.canvas.nativeCanvas.drawText(text, labelX, labelY, markerPaint)
+                        }
+                    }
+
+                    viewport.selectedIndex?.takeIf { it in range }?.let { selectedIndex ->
+                        val index = selectedIndex - start
                         val snappedX = plotLeft + index * stepX
-                        val price = yPrice(y)
+                        val selectedPrice = visible[index].close
+                        val y = priceY(selectedPrice)
                         drawLine(Color.White, Offset(snappedX, plotTop), Offset(snappedX, plotBottom), strokeWidth = 1.dp.toPx())
                         drawLine(Color.White, Offset(plotLeft, y), Offset(plotRight, y), strokeWidth = 1.dp.toPx())
-                        val priceText = formatPriceTick(price, tickStep)
+                        val priceText = formatPriceTick(selectedPrice, tickStep)
                         val timeText = formatChartTime(visible[index], visible, listOf(0, visible.lastIndex))
                         drawContext.canvas.nativeCanvas.drawText(priceText, plotRight + 5.dp.toPx(), y - 3.dp.toPx(), accentPaint)
                         val timeWidth = accentPaint.measureText(timeText)
@@ -638,6 +727,192 @@ private fun CandleChart(
         }
     }
 }
+
+private data class ChartViewport(
+    val zoom: Float = 1f,
+    val pan: Float = 0f,
+    val selectedIndex: Int? = null
+)
+
+private data class TradeMarker(
+    val pointIndex: Int,
+    val shares: Long,
+    val isBuyback: Boolean
+)
+
+private fun chartVisibleRange(size: Int, zoom: Float, pan: Float): IntRange {
+    if (size <= 1) return 0..0
+    val visibleCount = ceil(size / zoom).toInt().coerceIn(2, size)
+    val center = ((size - 1) / 2f + pan)
+        .coerceIn((visibleCount - 1) / 2f, size - 1 - (visibleCount - 1) / 2f)
+    val start = floor(center - (visibleCount - 1) / 2f).toInt().coerceIn(0, size - visibleCount)
+    return start until start + visibleCount
+}
+
+private fun buildTradeMarkers(
+    kline: List<StockKlinePoint>,
+    points: List<StockAvailableSharesPoint>
+): List<TradeMarker> {
+    val candleIndexByTime = kline.mapIndexedNotNull { index, point -> point.time?.let { it to index } }.toMap()
+    return points.sortedBy { it.time }.zipWithNext().mapNotNull { (current, next) ->
+        if (next.time - current.time != FIFTEEN_MINUTES_MS) return@mapNotNull null
+        val change = next.availableShares - current.availableShares
+        val pointIndex = candleIndexByTime[current.time] ?: return@mapNotNull null
+        change.takeIf { it != 0L }?.let {
+            TradeMarker(pointIndex = pointIndex, shares = abs(it), isBuyback = it > 0)
+        }
+    }
+}
+
+@Composable
+private fun AvailableSharesChart(
+    kline: List<StockKlinePoint>,
+    points: List<StockAvailableSharesPoint>,
+    viewportKey: String,
+    viewport: ChartViewport,
+    onViewportChange: (ChartViewport) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val sharesByTime = remember(points) { points.associate { it.time to it.availableShares } }
+    val latestViewport = rememberUpdatedState(viewport)
+
+    Card(colors = CardDefaults.cardColors(containerColor = PANEL_BG), modifier = modifier) {
+        Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("剩余股数趋势", fontWeight = FontWeight.Bold)
+            if (kline.isEmpty() || points.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("暂无剩余股数数据", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                Canvas(
+                    Modifier
+                        .fillMaxSize()
+                        .pointerInput(viewportKey, kline.size) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                var gestureViewport = latestViewport.value
+                                var totalMovement = Offset.Zero
+                                var lastPosition = Offset.Zero
+                                var transformed = false
+                                do {
+                                    val event = awaitPointerEvent()
+                                    val panChange = event.calculatePan()
+                                    val zoomChange = event.calculateZoom()
+                                    event.changes.firstOrNull()?.let { lastPosition = it.position }
+                                    totalMovement += panChange
+                                    if (event.changes.size > 1 || abs(zoomChange - 1f) > 0.01f) transformed = true
+
+                                    if (event.changes.size > 1) {
+                                        val nextZoom = (gestureViewport.zoom * zoomChange).coerceIn(1f, max(1f, kline.size / 5f))
+                                        val visibleCount = (kline.size / nextZoom).coerceAtLeast(2f)
+                                        val maxPan = (kline.size - visibleCount).coerceAtLeast(0f) / 2f
+                                        gestureViewport = gestureViewport.copy(
+                                            zoom = nextZoom,
+                                            pan = (gestureViewport.pan - panChange.x * visibleCount / size.width.coerceAtLeast(1)).coerceIn(-maxPan, maxPan),
+                                            selectedIndex = null
+                                        )
+                                        onViewportChange(gestureViewport)
+                                        event.changes.forEach { it.consume() }
+                                    } else if (abs(panChange.x) > abs(panChange.y)) {
+                                        val visibleCount = (kline.size / gestureViewport.zoom).coerceAtLeast(2f)
+                                        val maxPan = (kline.size - visibleCount).coerceAtLeast(0f) / 2f
+                                        gestureViewport = gestureViewport.copy(
+                                            pan = (gestureViewport.pan - panChange.x * visibleCount / size.width.coerceAtLeast(1)).coerceIn(-maxPan, maxPan),
+                                            selectedIndex = null
+                                        )
+                                        onViewportChange(gestureViewport)
+                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                    }
+                                } while (event.changes.any { it.pressed })
+
+                                if (!transformed && totalMovement.getDistance() < viewConfiguration.touchSlop) {
+                                    val plotLeft = 6.dp.toPx()
+                                    val plotRight = (size.width - 62.dp.toPx()).coerceAtLeast(plotLeft + 1f)
+                                    val range = chartVisibleRange(kline.size, gestureViewport.zoom, gestureViewport.pan)
+                                    val count = range.count()
+                                    val localIndex = if (count <= 1) 0 else
+                                        (((lastPosition.x - plotLeft) / (plotRight - plotLeft)) * (count - 1))
+                                            .toInt().coerceIn(0, count - 1)
+                                    onViewportChange(gestureViewport.copy(selectedIndex = range.first + localIndex))
+                                }
+                            }
+                        }
+                ) {
+                    val axisWidth = 62.dp.toPx()
+                    val plotLeft = 6.dp.toPx()
+                    val plotTop = 6.dp.toPx()
+                    val plotRight = (size.width - axisWidth).coerceAtLeast(plotLeft + 1f)
+                    val plotBottom = (size.height - 8.dp.toPx()).coerceAtLeast(plotTop + 1f)
+                    val plotWidth = plotRight - plotLeft
+                    val plotHeight = plotBottom - plotTop
+                    val range = chartVisibleRange(kline.size, viewport.zoom, viewport.pan)
+                    val visible = range.map { index -> kline[index].time?.let(sharesByTime::get) }
+                    val values = visible.filterNotNull()
+                    if (values.isEmpty()) return@Canvas
+
+                    val rawMin = values.minOrNull()!!.toDouble()
+                    val rawMax = values.maxOrNull()!!.toDouble()
+                    val span = (rawMax - rawMin).takeIf { it > 0.0 } ?: max(abs(rawMax) * 0.02, 1.0)
+                    val axisMin = rawMin - span * 0.08
+                    val axisMax = rawMax + span * 0.08
+                    fun shareY(value: Long): Float = plotBottom - (((value - axisMin) / (axisMax - axisMin)).toFloat() * plotHeight)
+
+                    val gridColor = Color(0xFF30343A)
+                    val labelPaint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.LTGRAY
+                        textSize = 9.dp.toPx()
+                        isAntiAlias = true
+                    }
+                    repeat(3) { tick ->
+                        val fraction = tick / 2f
+                        val y = plotBottom - fraction * plotHeight
+                        val value = axisMin + fraction * (axisMax - axisMin)
+                        drawLine(gridColor, Offset(plotLeft, y), Offset(plotRight, y), strokeWidth = 1f)
+                        drawContext.canvas.nativeCanvas.drawText(value.toLong().toString(), plotRight + 5.dp.toPx(), y + labelPaint.textSize * 0.35f, labelPaint)
+                    }
+
+                    val stepX = if (visible.size <= 1) plotWidth else plotWidth / (visible.size - 1)
+                    var pathStarted = false
+                    val linePath = Path()
+                    visible.forEachIndexed { index, value ->
+                        if (value == null) {
+                            pathStarted = false
+                        } else {
+                            val x = plotLeft + index * stepX
+                            val y = shareY(value)
+                            if (!pathStarted) {
+                                linePath.moveTo(x, y)
+                                pathStarted = true
+                            } else {
+                                linePath.lineTo(x, y)
+                            }
+                            drawCircle(Color(0xFF58A6FF), 2.dp.toPx(), Offset(x, y))
+                        }
+                    }
+                    drawPath(linePath, Color(0xFF58A6FF), style = Stroke(width = 1.5.dp.toPx()))
+
+                    viewport.selectedIndex?.takeIf { it in range }?.let { selectedIndex ->
+                        val localIndex = selectedIndex - range.first
+                        val x = plotLeft + localIndex * stepX
+                        drawLine(Color.White, Offset(x, plotTop), Offset(x, plotBottom), strokeWidth = 1.dp.toPx())
+                        visible[localIndex]?.let { value ->
+                            val text = "$value 股"
+                            val textWidth = labelPaint.measureText(text)
+                            drawContext.canvas.nativeCanvas.drawText(
+                                text,
+                                (x - textWidth / 2f).coerceIn(plotLeft, plotRight - textWidth),
+                                (shareY(value) - 5.dp.toPx()).coerceAtLeast(plotTop + labelPaint.textSize),
+                                labelPaint
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val FIFTEEN_MINUTES_MS = 15 * 60 * 1000L
 
 private fun niceTickStep(rawStep: Double): Double {
     if (!rawStep.isFinite() || rawStep <= 0.0) return 1.0

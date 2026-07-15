@@ -10,7 +10,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21"
 }
 
-version = "0.1.6"
+version = "0.1.7"
 
 group = "com.bilicraft.handheld.stockplugin"
 
