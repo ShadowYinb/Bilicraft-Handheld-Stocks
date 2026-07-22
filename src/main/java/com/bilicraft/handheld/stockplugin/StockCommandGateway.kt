@@ -15,20 +15,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import java.io.File
 
 class StockCommandGateway(
     private val host: BhPluginHost
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val commandMutex = Mutex()
-    private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
-    private val mappingFile = File(host.pluginDataDir, "stock_company_ids.json")
-    private val _mappings = MutableStateFlow(loadMappings())
-    val mappings: StateFlow<List<StockIdMapping>> = _mappings.asStateFlow()
     private val _money = MutableStateFlow<Double?>(null)
     val money: StateFlow<Double?> = _money.asStateFlow()
     private val messageWaiters = mutableListOf<MessageWaiter>()
@@ -58,42 +50,6 @@ class StockCommandGateway(
         parseCompanyInfo(lines, serverId)?.let { return Result.success(it) }
         val reason = lines.lastOrNull { looksLikeFailure(it) } ?: "查询超时或服务器未返回可解析的股票信息"
         Result.failure(IllegalStateException(reason))
-    }
-
-    suspend fun syncMappings(webCompanies: List<StockCompany>): StockCommandResult = commandMutex.withLock {
-        if (!isConnected()) return StockCommandResult.NotConnected("需要连接服务器后才能建立股票 ID 映射")
-        val webNames = webCompanies.map { it.name }.toSet()
-        val retained = _mappings.value.filter { it.companyName in webNames }.toMutableList()
-        val missing = webNames - retained.map { it.companyName }.toSet()
-        if (missing.isEmpty()) {
-            saveMappings(retained)
-            return StockCommandResult.Success("股票 ID 映射已是最新")
-        }
-
-        val knownIds = retained.map { it.serverId }.toMutableSet()
-        val candidates = (SEED_IDS + generateSequence((knownIds.maxOrNull() ?: SEED_IDS.max()) + 1) { it + 1 }.take(60))
-            .distinct()
-            .filterNot { it in knownIds }
-        var consecutiveMisses = 0
-        for (id in candidates) {
-            if ((webNames - retained.map { it.companyName }.toSet()).isEmpty()) break
-            val lines = executeWindow("/invest company info $id", timeoutMs = 3_500, settleMs = 700)
-            val info = parseCompanyInfo(lines, id)
-            if (info == null) {
-                consecutiveMisses++
-                if (id > SEED_IDS.max() && consecutiveMisses >= 12) break
-                continue
-            }
-            consecutiveMisses = 0
-            if (info.name in webNames) {
-                retained.removeAll { it.companyName == info.name || it.serverId == id }
-                retained += StockIdMapping(info.name, id)
-                saveMappings(retained)
-            }
-        }
-        val unresolved = webNames - retained.map { it.companyName }.toSet()
-        if (unresolved.isEmpty()) StockCommandResult.Success("股票 ID 映射已同步，共 ${retained.size} 家公司")
-        else StockCommandResult.Failure("仍有 ${unresolved.size} 家公司未匹配：${unresolved.joinToString("、")}")
     }
 
     suspend fun queryPortfolio(): Result<List<StockHolding>> = commandMutex.withLock {
@@ -272,18 +228,6 @@ class StockCommandGateway(
 
     private fun looksLikeFailure(text: String): Boolean = FAILURE_WORDS.any(text::contains)
 
-    private fun loadMappings(): List<StockIdMapping> = runCatching {
-        if (!mappingFile.exists()) emptyList()
-        else json.decodeFromString<List<StockIdMapping>>(mappingFile.readText())
-    }.getOrElse { emptyList() }
-
-    private fun saveMappings(value: List<StockIdMapping>) {
-        val normalized = value.distinctBy { it.companyName }.sortedBy { it.serverId }
-        mappingFile.parentFile?.mkdirs()
-        mappingFile.writeText(json.encodeToString(normalized))
-        _mappings.value = normalized
-    }
-
     private data class MessageWaiter(
         val predicate: (String) -> Boolean,
         val deferred: CompletableDeferred<String>? = null,
@@ -292,7 +236,6 @@ class StockCommandGateway(
     )
 
     companion object {
-        private val SEED_IDS = listOf(0, 1, 5, 6, 7, 8, 11, 12, 13, 14, 15)
         private val MONEY_REGEX = Regex("资金[:：]\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)")
         private val ID_REGEX = Regex("Id[:：]\\s*(\\d+)", RegexOption.IGNORE_CASE)
         private val PRICE_REGEX = Regex("价格[:：]\\s*([0-9]+(?:\\.[0-9]+)?)")

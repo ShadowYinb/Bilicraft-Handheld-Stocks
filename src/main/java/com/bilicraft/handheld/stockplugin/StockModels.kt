@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class StockCompany(
     val id: Int,
+    @SerialName("market_id") val marketId: Int? = null,
     val name: String,
     @SerialName("risk_level") val riskLevel: Int? = null,
     val status: String? = null,
@@ -73,9 +74,6 @@ data class LiveStockInfo(
     val availableShares: Long? = null
 )
 
-@Serializable
-data class StockIdMapping(val companyName: String, val serverId: Int)
-
 data class StockUiState(
     val loading: Boolean = false,
     val companies: List<StockCompany> = emptyList(),
@@ -88,8 +86,6 @@ data class StockUiState(
     val liveInfo: LiveStockInfo? = null,
     val holdings: List<StockHolding> = emptyList(),
     val portfolioLoading: Boolean = false,
-    val mappedServerId: Int? = null,
-    val syncInProgress: Boolean = false,
     val dialogMessage: String? = null,
     val lastError: String? = null
 )

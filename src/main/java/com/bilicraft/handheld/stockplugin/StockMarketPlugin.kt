@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -30,12 +31,16 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -69,7 +75,6 @@ import com.bilicraft.handheld.pluginapi.BhPluginDescriptor
 import com.bilicraft.handheld.pluginapi.BhPluginEntrypoint
 import com.bilicraft.handheld.pluginapi.BhPluginHost
 import com.bilicraft.handheld.pluginapi.BhPluginPanel
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -87,7 +92,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.1.7",
+        version = "0.1.8",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -103,7 +108,9 @@ object StockMarketPlugin : BhPlugin {
     override fun createPanel(host: BhPluginHost): BhPluginPanel = object : BhPluginPanel {
         @Composable
         override fun Content(host: BhPluginHost, onClose: () -> Unit) {
-            StockMarketPanel(host = host, onClose = onClose)
+            StockMarketTheme {
+                StockMarketPanel(host = host, onClose = onClose)
+            }
         }
     }
 
@@ -172,7 +179,6 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 val selectedId = state.selectedCompanyId?.takeIf { id -> companies.any { it.id == id } }
                     ?: companies.firstOrNull { it.latestPrice != 0.0 }?.id
                     ?: companies.firstOrNull()?.id
-                val selectedName = companies.firstOrNull { it.id == selectedId }?.name
                 state = state.copy(
                     loading = false,
                     companies = companies,
@@ -180,8 +186,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     kline = chartData.kline,
                     availableShares = chartData.availableShares,
                     health = health,
-                    mappedServerId = gateway.mappings.value.firstOrNull { it.companyName == selectedName }?.serverId,
-                    liveInfo = state.liveInfo?.takeIf { it.name == selectedName }
+                    liveInfo = state.liveInfo?.takeIf { it.name == companies.firstOrNull { company -> company.id == selectedId }?.name }
                 )
             }.onFailure { error ->
                 state = state.copy(loading = false, lastError = error.message ?: "加载失败")
@@ -190,14 +195,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     }
 
     LaunchedEffect(gateway) {
-        combine(gateway.money, gateway.mappings) { money, mappings -> money to mappings }
-            .collect { (money, mappings) ->
-                val selectedName = selectedCompany()?.name
-                state = state.copy(
-                    walletBalance = money,
-                    mappedServerId = mappings.firstOrNull { it.companyName == selectedName }?.serverId
-                )
-            }
+        gateway.money.collect { money -> state = state.copy(walletBalance = money) }
     }
 
     LaunchedEffect(Unit) {
@@ -218,8 +216,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
 
     Scaffold(
-        containerColor = Color.Black,
-        contentColor = Color.White
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
     ) { padding ->
         Column(
             modifier = Modifier
@@ -251,10 +249,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 holdings = state.holdings,
                 selectedId = state.selectedCompanyId,
                 onSelect = { companyId ->
-                    val companyName = state.companies.firstOrNull { it.id == companyId }?.name
                     state = state.copy(
                         selectedCompanyId = companyId,
-                        mappedServerId = gateway.mappings.value.firstOrNull { it.companyName == companyName }?.serverId,
                         liveInfo = null,
                         loading = true,
                         lastError = null
@@ -277,7 +273,6 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 viewportKey = "${state.selectedCompanyId}:${state.selectedInterval}",
                 viewport = chartViewport,
                 onViewportChange = { chartViewport = it },
-                pageScrollState = pageScrollState,
                 modifier = Modifier.fillMaxWidth().height(330.dp)
             )
             AvailableSharesChart(
@@ -295,23 +290,10 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 liveInfo = state.liveInfo,
                 holdings = state.holdings,
                 portfolioLoading = state.portfolioLoading,
-                mappedServerId = state.mappedServerId,
-                syncing = state.syncInProgress,
+                serverId = selectedCompany()?.marketId,
                 onActionChange = { action = it },
                 onAmountChange = { amount = it.filter(Char::isDigit) },
                 onMoney = { scope.launch { showResult(gateway.refreshMoney()) } },
-                onSync = {
-                    scope.launch {
-                        state = state.copy(syncInProgress = true)
-                        val result = gateway.syncMappings(state.companies)
-                        val selectedName = selectedCompany()?.name
-                        state = state.copy(
-                            syncInProgress = false,
-                            mappedServerId = gateway.mappings.value.firstOrNull { it.companyName == selectedName }?.serverId
-                        )
-                        showResult(result)
-                    }
-                },
                 onPortfolio = {
                     scope.launch {
                         state = state.copy(portfolioLoading = true)
@@ -329,9 +311,9 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     }
                 },
                 onQueryPrice = {
-                    val serverId = state.mappedServerId
+                    val serverId = selectedCompany()?.marketId
                     if (serverId == null) {
-                        state = state.copy(dialogMessage = "当前公司尚未建立服务器 ID 映射，请先点击“同步股票映射”。")
+                        state = state.copy(dialogMessage = "网页数据未提供当前公司的股票 ID，请刷新后重试。")
                     } else {
                         scope.launch {
                             gateway.queryCompanyInfo(serverId)
@@ -342,9 +324,9 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 },
                 onSend = {
                     val amountValue = amount.toLongOrNull()
-                    val serverId = state.mappedServerId
+                    val serverId = selectedCompany()?.marketId
                     when {
-                        serverId == null -> state = state.copy(dialogMessage = "当前公司尚未建立服务器 ID 映射。")
+                        serverId == null -> state = state.copy(dialogMessage = "网页数据未提供当前公司的股票 ID，请刷新后重试。")
                         amountValue == null || amountValue <= 0 -> state = state.copy(dialogMessage = "请输入有效的交易数量。")
                         else -> scope.launch {
                             gateway.queryCompanyInfo(serverId)
@@ -397,6 +379,7 @@ private fun StockPickerList(
     selectedId: Int?,
     onSelect: (Int) -> Unit
 ) {
+    val colors = MaterialTheme.colorScheme
     val listScrollState = rememberScrollState()
     val holdingByName = remember(holdings) { holdings.associateBy { it.companyName } }
     val consumeNestedScroll = remember {
@@ -411,7 +394,7 @@ private fun StockPickerList(
         }
     }
 
-    Card(colors = CardDefaults.cardColors(containerColor = PANEL_BG)) {
+    Card(colors = CardDefaults.cardColors(containerColor = colors.surface)) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("股票列表", fontWeight = FontWeight.Bold)
             Column(
@@ -434,23 +417,34 @@ private fun StockPickerList(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(if (selected) Color(0xFF13233A) else Color(0xFF111111), RoundedCornerShape(8.dp))
+                            .background(
+                                if (selected) colors.secondaryContainer else colors.surfaceVariant,
+                                RoundedCornerShape(8.dp)
+                            )
                             .clickable { onSelect(company.id) }
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(company.id.toString(), color = Color.LightGray, style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            company.marketId?.toString() ?: "--",
+                            color = colors.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall
+                        )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(company.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
-                            Text(
-                                buildString {
-                                    append("${company.status ?: "--"} · 风险 ${company.riskLevel ?: "--"}")
-                                    if (holding != null) append(" · 持有 ${holding.shares} 股")
-                                },
-                                color = if (holding != null) Color(0xFFFFC857) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(company.status ?: "--", color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    "风险${company.riskLevel ?: "--"}",
+                                    color = riskColor(company.riskLevel),
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                                if (holding != null) {
+                                    Text("持有 ${holding.shares} 股", color = colors.tertiary, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(company.latestPrice?.let { "%.2f".format(it) } ?: "--", fontWeight = FontWeight.Bold)
@@ -465,7 +459,13 @@ private fun StockPickerList(
 
 @Composable
 private fun StockSummary(company: StockCompany?) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+    val colors = MaterialTheme.colorScheme
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = colors.surface,
+            contentColor = colors.onSurface
+        )
+    ) {
         Row(
             Modifier.fillMaxWidth().padding(14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -473,7 +473,7 @@ private fun StockSummary(company: StockCompany?) {
         ) {
             Column(Modifier.weight(1f)) {
                 Text(company?.name ?: "暂无股票", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Text("状态：${company?.status ?: "--"} · 风险 ${company?.riskLevel ?: "--"}")
+                Text("状态：${company?.status ?: "--"} · 风险 ${company?.riskLevel ?: "--"}", color = colors.onSurfaceVariant)
             }
             Column(horizontalAlignment = Alignment.End) {
                 val change = company?.changePct
@@ -484,7 +484,7 @@ private fun StockSummary(company: StockCompany?) {
                 Text(
                     change?.let { "%+.2f%%".format(it) } ?: "--",
                     color = when {
-                        change == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        change == null -> colors.onSurfaceVariant
                         change >= 0 -> STOCK_UP
                         else -> STOCK_DOWN
                     }
@@ -512,15 +512,15 @@ private fun CandleChart(
     viewportKey: String,
     viewport: ChartViewport,
     onViewportChange: (ChartViewport) -> Unit,
-    pageScrollState: androidx.compose.foundation.ScrollState,
     modifier: Modifier = Modifier
 ) {
+    val colors = MaterialTheme.colorScheme
     var showCloseLine by remember(viewportKey) { mutableStateOf(true) }
     var showCandles by remember(viewportKey) { mutableStateOf(true) }
     var showTradeMarkers by remember(viewportKey) { mutableStateOf(true) }
     val latestViewport = rememberUpdatedState(viewport)
 
-    Card(colors = CardDefaults.cardColors(containerColor = PANEL_BG), modifier = modifier) {
+    Card(colors = CardDefaults.cardColors(containerColor = colors.surface), modifier = modifier) {
         Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("K 线", fontWeight = FontWeight.Bold)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -634,13 +634,13 @@ private fun CandleChart(
                     fun priceY(price: Double): Float = plotBottom - (((price - axisMin) / priceSpan).toFloat() * plotHeight)
                     fun yPrice(y: Float): Double = axisMin + ((plotBottom - y) / plotHeight) * priceSpan
 
-                    val gridColor = Color(0xFF30343A)
+                    val gridColor = colors.outlineVariant
                     val labelPaint = android.graphics.Paint().apply {
-                        color = android.graphics.Color.LTGRAY
+                        color = colors.onSurfaceVariant.toArgb()
                         textSize = 10.dp.toPx()
                         isAntiAlias = true
                     }
-                    val accentPaint = android.graphics.Paint(labelPaint).apply { color = android.graphics.Color.WHITE }
+                    val accentPaint = android.graphics.Paint(labelPaint).apply { color = colors.onSurface.toArgb() }
 
                     drawContext.canvas.nativeCanvas.drawText("最高 ${formatPriceTick(rawMax, tickStep)}", plotLeft, 11.dp.toPx(), accentPaint)
                     val minLabel = "最低 ${formatPriceTick(rawMin, tickStep)}"
@@ -687,25 +687,32 @@ private fun CandleChart(
                     }
 
                     if (showTradeMarkers && interval == "15m") {
-                        buildTradeMarkers(points, availableShares).forEachIndexed { markerIndex, marker ->
-                            if (marker.pointIndex !in range) return@forEachIndexed
+                        buildTradeMarkers(points, availableShares).forEach { marker ->
+                            if (marker.pointIndex !in range) return@forEach
                             val localIndex = marker.pointIndex - start
                             val x = plotLeft + localIndex * stepX
                             val y = priceY(points[marker.pointIndex].close)
                             val color = if (marker.isBuyback) Color(0xFF58A6FF) else Color(0xFFFF4D4F)
-                            drawCircle(color, radius = 4.dp.toPx(), center = Offset(x, y))
-                            val text = "${if (marker.isBuyback) "回购" else "售出"}${marker.shares}股"
-                            val markerPaint = android.graphics.Paint(labelPaint).apply {
-                                this.color = if (marker.isBuyback) android.graphics.Color.rgb(121, 192, 255)
-                                else android.graphics.Color.rgb(255, 123, 114)
-                                textSize = 9.dp.toPx()
+                            val radius = tradeMarkerRadius(marker.shares).dp.toPx()
+                            drawCircle(color.copy(alpha = 0.22f), radius = radius + 2.dp.toPx(), center = Offset(x, y))
+                            drawCircle(color, radius = radius, center = Offset(x, y))
+                            if (viewport.selectedIndex == marker.pointIndex) {
+                                val text = "${if (marker.isBuyback) "回购" else "售出"} ${marker.shares} 股"
+                                val markerPaint = android.graphics.Paint(labelPaint).apply {
+                                    this.color = if (marker.isBuyback) android.graphics.Color.rgb(121, 192, 255)
+                                    else android.graphics.Color.rgb(255, 123, 114)
+                                    textSize = 10.dp.toPx()
+                                    isFakeBoldText = true
+                                }
+                                val textWidth = markerPaint.measureText(text)
+                                val labelX = (x - textWidth / 2f).coerceIn(plotLeft, plotRight - textWidth)
+                                val labelY = if (marker.isBuyback) {
+                                    (y + radius + 13.dp.toPx()).coerceAtMost(plotBottom - 2.dp.toPx())
+                                } else {
+                                    (y - radius - 7.dp.toPx()).coerceAtLeast(plotTop + markerPaint.textSize)
+                                }
+                                drawContext.canvas.nativeCanvas.drawText(text, labelX, labelY, markerPaint)
                             }
-                            val textWidth = markerPaint.measureText(text)
-                            val labelX = (x - textWidth / 2f).coerceIn(plotLeft, plotRight - textWidth)
-                            val offset = (12 + (markerIndex % 2) * 12).dp.toPx()
-                            val labelY = if (marker.isBuyback) (y + offset).coerceAtMost(plotBottom - 2.dp.toPx())
-                            else (y - offset).coerceAtLeast(plotTop + markerPaint.textSize)
-                            drawContext.canvas.nativeCanvas.drawText(text, labelX, labelY, markerPaint)
                         }
                     }
 
@@ -714,8 +721,8 @@ private fun CandleChart(
                         val snappedX = plotLeft + index * stepX
                         val selectedPrice = visible[index].close
                         val y = priceY(selectedPrice)
-                        drawLine(Color.White, Offset(snappedX, plotTop), Offset(snappedX, plotBottom), strokeWidth = 1.dp.toPx())
-                        drawLine(Color.White, Offset(plotLeft, y), Offset(plotRight, y), strokeWidth = 1.dp.toPx())
+                        drawLine(colors.onSurface, Offset(snappedX, plotTop), Offset(snappedX, plotBottom), strokeWidth = 1.dp.toPx())
+                        drawLine(colors.onSurface, Offset(plotLeft, y), Offset(plotRight, y), strokeWidth = 1.dp.toPx())
                         val priceText = formatPriceTick(selectedPrice, tickStep)
                         val timeText = formatChartTime(visible[index], visible, listOf(0, visible.lastIndex))
                         drawContext.canvas.nativeCanvas.drawText(priceText, plotRight + 5.dp.toPx(), y - 3.dp.toPx(), accentPaint)
@@ -739,6 +746,14 @@ private data class TradeMarker(
     val shares: Long,
     val isBuyback: Boolean
 )
+
+private fun tradeMarkerRadius(shares: Long): Float = when {
+    shares >= 10_000 -> 8f
+    shares >= 1_000 -> 7f
+    shares >= 100 -> 6f
+    shares >= 10 -> 5f
+    else -> 4f
+}
 
 private fun chartVisibleRange(size: Int, zoom: Float, pan: Float): IntRange {
     if (size <= 1) return 0..0
@@ -773,10 +788,11 @@ private fun AvailableSharesChart(
     onViewportChange: (ChartViewport) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colors = MaterialTheme.colorScheme
     val sharesByTime = remember(points) { points.associate { it.time to it.availableShares } }
     val latestViewport = rememberUpdatedState(viewport)
 
-    Card(colors = CardDefaults.cardColors(containerColor = PANEL_BG), modifier = modifier) {
+    Card(colors = CardDefaults.cardColors(containerColor = colors.surface), modifier = modifier) {
         Column(Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("剩余股数趋势", fontWeight = FontWeight.Bold)
             if (kline.isEmpty() || points.isEmpty()) {
@@ -857,9 +873,9 @@ private fun AvailableSharesChart(
                     val axisMax = rawMax + span * 0.08
                     fun shareY(value: Long): Float = plotBottom - (((value - axisMin) / (axisMax - axisMin)).toFloat() * plotHeight)
 
-                    val gridColor = Color(0xFF30343A)
+                    val gridColor = colors.outlineVariant
                     val labelPaint = android.graphics.Paint().apply {
-                        color = android.graphics.Color.LTGRAY
+                        color = colors.onSurfaceVariant.toArgb()
                         textSize = 9.dp.toPx()
                         isAntiAlias = true
                     }
@@ -886,15 +902,15 @@ private fun AvailableSharesChart(
                             } else {
                                 linePath.lineTo(x, y)
                             }
-                            drawCircle(Color(0xFF58A6FF), 2.dp.toPx(), Offset(x, y))
+                            drawCircle(colors.primary, 2.dp.toPx(), Offset(x, y))
                         }
                     }
-                    drawPath(linePath, Color(0xFF58A6FF), style = Stroke(width = 1.5.dp.toPx()))
+                    drawPath(linePath, colors.primary, style = Stroke(width = 1.5.dp.toPx()))
 
                     viewport.selectedIndex?.takeIf { it in range }?.let { selectedIndex ->
                         val localIndex = selectedIndex - range.first
                         val x = plotLeft + localIndex * stepX
-                        drawLine(Color.White, Offset(x, plotTop), Offset(x, plotBottom), strokeWidth = 1.dp.toPx())
+                        drawLine(colors.onSurface, Offset(x, plotTop), Offset(x, plotBottom), strokeWidth = 1.dp.toPx())
                         visible[localIndex]?.let { value ->
                             val text = "$value 股"
                             val textWidth = labelPaint.measureText(text)
@@ -965,20 +981,19 @@ private fun TradePanel(
     liveInfo: LiveStockInfo?,
     holdings: List<StockHolding>,
     portfolioLoading: Boolean,
-    mappedServerId: Int?,
-    syncing: Boolean,
+    serverId: Int?,
     onActionChange: (String) -> Unit,
     onAmountChange: (String) -> Unit,
     onMoney: () -> Unit,
-    onSync: () -> Unit,
     onPortfolio: () -> Unit,
     onQueryPrice: () -> Unit,
     onSend: () -> Unit
 ) {
-    Card(colors = CardDefaults.cardColors(containerColor = PANEL_BG)) {
+    val colors = MaterialTheme.colorScheme
+    Card(colors = CardDefaults.cardColors(containerColor = colors.surface)) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("交易命令", fontWeight = FontWeight.Bold)
-            Text("服务器股票 ID：${mappedServerId?.toString() ?: "未映射"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("服务器股票 ID：${serverId?.toString() ?: "网页未提供"}", color = colors.onSurfaceVariant)
             liveInfo?.let {
                 Text("实时：${it.name} · ${"%.2f".format(it.price)} · ${it.status ?: "--"}")
                 Text(
@@ -998,15 +1013,24 @@ private fun TradePanel(
                 onValueChange = onAmountChange,
                 label = { Text("数量") },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = colors.onSurface,
+                    unfocusedTextColor = colors.onSurface,
+                    cursorColor = colors.primary,
+                    focusedBorderColor = colors.primary,
+                    unfocusedBorderColor = colors.outline,
+                    focusedLabelColor = colors.primary,
+                    unfocusedLabelColor = colors.onSurfaceVariant
+                )
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSend, enabled = mappedServerId != null) { Text("发送") }
-                OutlinedButton(onClick = onQueryPrice, enabled = mappedServerId != null) { Text("查价") }
+                Button(onClick = onSend, enabled = serverId != null) { Text("发送") }
+                OutlinedButton(onClick = onQueryPrice, enabled = serverId != null) { Text("查价") }
                 OutlinedButton(onClick = onMoney) { Text("资金") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onSync, enabled = !syncing) { Text(if (syncing) "同步中" else "同步映射") }
                 OutlinedButton(onClick = onPortfolio, enabled = !portfolioLoading) { Text(if (portfolioLoading) "查询中" else "持股") }
             }
             if (holdings.isNotEmpty()) {
@@ -1024,6 +1048,53 @@ private fun TradePanel(
     }
 }
 
-private val PANEL_BG = Color(0xFF151515)
 private val STOCK_UP = Color(0xFF3FB950)
 private val STOCK_DOWN = Color(0xFFF85149)
+
+@Composable
+private fun riskColor(riskLevel: Int?): Color = when (riskLevel) {
+    1 -> if (isSystemInDarkTheme()) Color(0xFF58A6FF) else Color(0xFF0969DA)
+    2 -> if (isSystemInDarkTheme()) Color(0xFF3FB950) else Color(0xFF1A7F37)
+    3 -> if (isSystemInDarkTheme()) Color(0xFFD29922) else Color(0xFF9A6700)
+    4 -> if (isSystemInDarkTheme()) Color(0xFFDB6D28) else Color(0xFFBC4C00)
+    5 -> if (isSystemInDarkTheme()) Color(0xFFF85149) else Color(0xFFCF222E)
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+@Composable
+private fun StockMarketTheme(content: @Composable () -> Unit) {
+    val colorScheme = if (isSystemInDarkTheme()) STOCK_DARK_COLORS else STOCK_LIGHT_COLORS
+    MaterialTheme(colorScheme = colorScheme, content = content)
+}
+
+private val STOCK_DARK_COLORS: ColorScheme = darkColorScheme(
+    primary = Color(0xFF58A6FF),
+    onPrimary = Color(0xFF001D36),
+    secondaryContainer = Color(0xFF13233A),
+    onSecondaryContainer = Color(0xFFD8E8FF),
+    tertiary = Color(0xFFFFC857),
+    background = Color(0xFF0D1117),
+    onBackground = Color(0xFFF0F0F0),
+    surface = Color(0xFF151515),
+    onSurface = Color(0xFFF0F0F0),
+    surfaceVariant = Color(0xFF222222),
+    onSurfaceVariant = Color(0xFFB8B8B8),
+    outline = Color(0xFF5C6370),
+    outlineVariant = Color(0xFF30343A)
+)
+
+private val STOCK_LIGHT_COLORS: ColorScheme = lightColorScheme(
+    primary = Color(0xFF0969DA),
+    onPrimary = Color.White,
+    secondaryContainer = Color(0xFFDDF4FF),
+    onSecondaryContainer = Color(0xFF04395E),
+    tertiary = Color(0xFF9A6700),
+    background = Color(0xFFF6F8FA),
+    onBackground = Color(0xFF1F2328),
+    surface = Color.White,
+    onSurface = Color(0xFF1F2328),
+    surfaceVariant = Color(0xFFEAEEF2),
+    onSurfaceVariant = Color(0xFF59636E),
+    outline = Color(0xFF8C959F),
+    outlineVariant = Color(0xFFD0D7DE)
+)
