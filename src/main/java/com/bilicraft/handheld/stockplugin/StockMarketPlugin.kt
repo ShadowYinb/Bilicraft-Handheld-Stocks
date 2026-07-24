@@ -76,6 +76,7 @@ import com.bilicraft.handheld.pluginapi.BhPluginEntrypoint
 import com.bilicraft.handheld.pluginapi.BhPluginHost
 import com.bilicraft.handheld.pluginapi.BhPluginPanel
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -92,7 +93,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.1.8",
+        version = "0.1.9",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -133,7 +134,16 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     var action by remember { mutableStateOf("buy") }
     var amount by remember { mutableStateOf("") }
     var chartViewport by remember { mutableStateOf(ChartViewport()) }
+    var chartDisplaySettings by remember(host) {
+        mutableStateOf(loadChartDisplaySettings(host.pluginDataDir))
+    }
     val pageScrollState = rememberScrollState()
+
+    fun updateChartDisplaySettings(settings: ChartDisplaySettings) {
+        chartDisplaySettings = settings
+        runCatching { saveChartDisplaySettings(host.pluginDataDir, settings) }
+            .onFailure { host.log("保存 K 线显示设置失败：${it.message}") }
+    }
 
     fun selectedCompany(): StockCompany? = state.companies.firstOrNull { it.id == state.selectedCompanyId }
 
@@ -273,6 +283,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 viewportKey = "${state.selectedCompanyId}:${state.selectedInterval}",
                 viewport = chartViewport,
                 onViewportChange = { chartViewport = it },
+                displaySettings = chartDisplaySettings,
+                onDisplaySettingsChange = ::updateChartDisplaySettings,
                 modifier = Modifier.fillMaxWidth().height(330.dp)
             )
             AvailableSharesChart(
@@ -512,12 +524,11 @@ private fun CandleChart(
     viewportKey: String,
     viewport: ChartViewport,
     onViewportChange: (ChartViewport) -> Unit,
+    displaySettings: ChartDisplaySettings,
+    onDisplaySettingsChange: (ChartDisplaySettings) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = MaterialTheme.colorScheme
-    var showCloseLine by remember(viewportKey) { mutableStateOf(true) }
-    var showCandles by remember(viewportKey) { mutableStateOf(true) }
-    var showTradeMarkers by remember(viewportKey) { mutableStateOf(true) }
     val latestViewport = rememberUpdatedState(viewport)
 
     Card(colors = CardDefaults.cardColors(containerColor = colors.surface), modifier = modifier) {
@@ -525,26 +536,32 @@ private fun CandleChart(
             Text("K 线", fontWeight = FontWeight.Bold)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 OutlinedButton(
-                    onClick = { showCloseLine = !showCloseLine },
+                    onClick = {
+                        onDisplaySettingsChange(displaySettings.copy(showCloseLine = !displaySettings.showCloseLine))
+                    },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    Text(if (showCloseLine) "隐藏折线" else "显示折线", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    Text(if (displaySettings.showCloseLine) "隐藏折线" else "显示折线", style = MaterialTheme.typography.labelSmall, maxLines = 1)
                 }
                 OutlinedButton(
-                    onClick = { showCandles = !showCandles },
+                    onClick = {
+                        onDisplaySettingsChange(displaySettings.copy(showCandles = !displaySettings.showCandles))
+                    },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    Text(if (showCandles) "隐藏K线" else "显示K线", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    Text(if (displaySettings.showCandles) "隐藏K线" else "显示K线", style = MaterialTheme.typography.labelSmall, maxLines = 1)
                 }
                 OutlinedButton(
-                    onClick = { showTradeMarkers = !showTradeMarkers },
+                    onClick = {
+                        onDisplaySettingsChange(displaySettings.copy(showTradeMarkers = !displaySettings.showTradeMarkers))
+                    },
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
                     Text(
-                        if (showTradeMarkers) "隐藏售出/回购" else "显示售出/回购",
+                        if (displaySettings.showTradeMarkers) "隐藏售出/回购" else "显示售出/回购",
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1
                     )
@@ -666,7 +683,7 @@ private fun CandleChart(
                     }
 
                     val stepX = if (visible.size <= 1) plotWidth else plotWidth / (visible.size - 1)
-                    if (showCloseLine) {
+                    if (displaySettings.showCloseLine) {
                         val closePath = Path()
                         visible.forEachIndexed { index, point ->
                             val x = plotLeft + index * stepX
@@ -676,7 +693,7 @@ private fun CandleChart(
                         drawPath(closePath, Color(0xFF58A6FF), style = Stroke(width = 2.dp.toPx()))
                     }
 
-                    if (showCandles) {
+                    if (displaySettings.showCandles) {
                         val candleWidth = (stepX * 0.55f).coerceIn(2.dp.toPx(), 10.dp.toPx())
                         visible.forEachIndexed { index, point ->
                             val x = plotLeft + index * stepX
@@ -686,7 +703,7 @@ private fun CandleChart(
                         }
                     }
 
-                    if (showTradeMarkers && interval == "15m") {
+                    if (displaySettings.showTradeMarkers && interval == "15m") {
                         buildTradeMarkers(points, availableShares).forEach { marker ->
                             if (marker.pointIndex !in range) return@forEach
                             val localIndex = marker.pointIndex - start
@@ -741,6 +758,12 @@ private data class ChartViewport(
     val selectedIndex: Int? = null
 )
 
+private data class ChartDisplaySettings(
+    val showCloseLine: Boolean = true,
+    val showCandles: Boolean = true,
+    val showTradeMarkers: Boolean = true
+)
+
 private data class TradeMarker(
     val pointIndex: Int,
     val shares: Long,
@@ -770,7 +793,8 @@ private fun buildTradeMarkers(
 ): List<TradeMarker> {
     val candleIndexByTime = kline.mapIndexedNotNull { index, point -> point.time?.let { it to index } }.toMap()
     return points.sortedBy { it.time }.zipWithNext().mapNotNull { (current, next) ->
-        if (next.time - current.time != FIFTEEN_MINUTES_MS) return@mapNotNull null
+        val elapsed = next.time - current.time
+        if (elapsed !in MIN_TRADE_SAMPLE_INTERVAL_MS..MAX_TRADE_SAMPLE_INTERVAL_MS) return@mapNotNull null
         val change = next.availableShares - current.availableShares
         val pointIndex = candleIndexByTime[current.time] ?: return@mapNotNull null
         change.takeIf { it != 0L }?.let {
@@ -928,7 +952,39 @@ private fun AvailableSharesChart(
     }
 }
 
-private const val FIFTEEN_MINUTES_MS = 15 * 60 * 1000L
+private const val MIN_TRADE_SAMPLE_INTERVAL_MS = 10 * 60 * 1000L
+private const val MAX_TRADE_SAMPLE_INTERVAL_MS = 25 * 60 * 1000L
+private const val CHART_SETTINGS_FILE = "chart-display.properties"
+
+private fun loadChartDisplaySettings(pluginDataDir: File): ChartDisplaySettings {
+    val values = runCatching {
+        pluginDataDir.resolve(CHART_SETTINGS_FILE)
+            .takeIf(File::isFile)
+            ?.readLines()
+            ?.mapNotNull { line ->
+                val separator = line.indexOf('=')
+                if (separator <= 0) null else line.substring(0, separator) to line.substring(separator + 1)
+            }
+            ?.toMap()
+            .orEmpty()
+    }.getOrDefault(emptyMap())
+    return ChartDisplaySettings(
+        showCloseLine = values["showCloseLine"]?.toBooleanStrictOrNull() ?: true,
+        showCandles = values["showCandles"]?.toBooleanStrictOrNull() ?: true,
+        showTradeMarkers = values["showTradeMarkers"]?.toBooleanStrictOrNull() ?: true
+    )
+}
+
+private fun saveChartDisplaySettings(pluginDataDir: File, settings: ChartDisplaySettings) {
+    pluginDataDir.mkdirs()
+    pluginDataDir.resolve(CHART_SETTINGS_FILE).writeText(
+        buildString {
+            appendLine("showCloseLine=${settings.showCloseLine}")
+            appendLine("showCandles=${settings.showCandles}")
+            appendLine("showTradeMarkers=${settings.showTradeMarkers}")
+        }
+    )
+}
 
 private fun niceTickStep(rawStep: Double): Double {
     if (!rawStep.isFinite() || rawStep <= 0.0) return 1.0
