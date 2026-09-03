@@ -38,7 +38,7 @@ class StockCommandGateway(
         val response = executeAndCollect("/bal", 4_000) { text ->
             MONEY_REGEX.containsMatchIn(text) || text.contains("余额:") || text.contains("余额：")
         } ?: return StockCommandResult.Timeout("/bal")
-        val amount = MONEY_REGEX.find(response)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
+        val amount = parseMoneyAmount(response)
             ?: return StockCommandResult.Failure("服务器已响应，但未能解析资金数额")
         _money.value = amount
         StockCommandResult.Success("当前资金：$amount 元")
@@ -205,7 +205,7 @@ class StockCommandGateway(
                     shares = SHARES_REGEX.find(line)?.groupValues?.getOrNull(1)?.toLongOrNull()
                 }
                 line.startsWith("总价值:") || line.startsWith("总价值：") -> {
-                    totalValue = TOTAL_VALUE_REGEX.find(line)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                    totalValue = parseTotalValue(line)
                     flush()
                 }
                 isPortfolioCompanyName(line) -> {
@@ -261,13 +261,13 @@ class StockCommandGateway(
     )
 
     companion object {
-        private val MONEY_REGEX = Regex("(?:资金|余额)[:：]?\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)")
+        private val MONEY_REGEX = Regex("(?:资金|余额)[:：]?\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)\\s*([KMBT]?)", RegexOption.IGNORE_CASE)
         private val ID_REGEX = Regex("Id[:：]\\s*(\\d+)", RegexOption.IGNORE_CASE)
         private val PRICE_REGEX = Regex("价格[:：]\\s*([0-9,]+(?:\\.[0-9]+)?)\\s*([KMBT]?)", RegexOption.IGNORE_CASE)
         private val STATUS_REGEX = Regex("状态[:：]\\s*([^\\n]+)")
         private val AVAILABLE_REGEX = Regex("可用股数[:：]\\s*(\\d+)")
         private val SHARES_REGEX = Regex("股票[:：]\\s*(\\d+)")
-        private val TOTAL_VALUE_REGEX = Regex("总价值[:：]\\s*([0-9]+(?:\\.[0-9]+)?)")
+        private val TOTAL_VALUE_REGEX = Regex("总价值[:：]\\s*([0-9,]+(?:\\.[0-9]+)?)\\s*([KMBT]?)", RegexOption.IGNORE_CASE)
         private val PORTFOLIO_COMPANY_REGEX = Regex("(?:#|Id[:：]?\\s*)?(\\d+)\\s*[·.、:：-]?\\s*(.+)", RegexOption.IGNORE_CASE)
         private val FORMAT_CODE_REGEX = Regex("§.")
         private const val COMMAND_GAP_MS = 300L
@@ -284,8 +284,17 @@ class StockCommandGateway(
             "没有任何股票"
         )
 
-        internal fun parseMarketPrice(text: String): Double? {
-            val match = PRICE_REGEX.find(text) ?: return null
+        internal fun parseMarketPrice(text: String): Double? =
+            parseAbbreviatedNumber(PRICE_REGEX.find(text))
+
+        internal fun parseMoneyAmount(text: String): Double? =
+            parseAbbreviatedNumber(MONEY_REGEX.find(text))
+
+        internal fun parseTotalValue(text: String): Double? =
+            parseAbbreviatedNumber(TOTAL_VALUE_REGEX.find(text))
+
+        private fun parseAbbreviatedNumber(match: MatchResult?): Double? {
+            match ?: return null
             val number = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return null
             val multiplier = when (match.groupValues[2].uppercase()) {
                 "K" -> 1_000.0
