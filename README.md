@@ -2,7 +2,7 @@
 
 Bilicraft Handheld Stocks（股市面板）是为 **Bilicraft Handheld** 制作的外部 Compose 插件。它把帕拉伦股市行情、K 线分析、玩家资金与持股查询以及股票交易整合在同一个移动端面板中。
 
-当前版本：`0.2.4`
+当前版本：`0.2.5`
 
 ## 功能
 
@@ -18,7 +18,7 @@ Bilicraft Handheld Stocks（股市面板）是为 **Bilicraft Handheld** 制作�
 - 全局采用绿涨红跌视觉语义，货币单位统一显示为“元”。
 - 获取公司列表、市场健康状态和多周期 K 线数据。
 - 支持“单次采集”（接口周期 `15m`）、`1h`、`4h`、`24h` K 线周期。
-- 初次选择股票时，单次采集默认显示最近 24 小时，其他周期按对应的 7 天、30 天、90 天范围自适应显示。
+- 首次请求展示服务端返回的完整 K 线分段；平移或缩放到左边界后按需加载更早历史。
 - 蜡烛图可切换收盘价折线显示。
 - 折线、K 线和售出/回购点的显示设置会在切换股票及退出应用后保留。
 - K 线支持横向拖动、双指缩放和单击十字线。
@@ -82,7 +82,7 @@ sdk.dir=/path/to/android-sdk
 生成文件位于：
 
 ```text
-build/outputs/bhplugin/stock-market-0.2.4.bhplugin
+build/outputs/bhplugin/stock-market-0.2.5.bhplugin
 ```
 
 `.bhplugin` 是 ZIP 格式的插件包，包含：
@@ -126,9 +126,9 @@ classes.dex
 
 ```bash
 gradle --no-daemon clean packageBhPlugin
-unzip -t build/outputs/bhplugin/stock-market-0.2.4.bhplugin
-unzip -p build/outputs/bhplugin/stock-market-0.2.4.bhplugin plugin.json
-sha256sum build/outputs/bhplugin/stock-market-0.2.4.bhplugin
+unzip -t build/outputs/bhplugin/stock-market-0.2.5.bhplugin
+unzip -p build/outputs/bhplugin/stock-market-0.2.5.bhplugin plugin.json
+sha256sum build/outputs/bhplugin/stock-market-0.2.5.bhplugin
 ```
 
 ## 许可

@@ -105,7 +105,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.2.4",
+        version = "0.2.5",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -156,6 +156,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     var action by remember { mutableStateOf("buy") }
     var amount by remember { mutableStateOf("") }
     var chartViewport by remember { mutableStateOf(ChartViewport()) }
+    var chartRequestSequence by remember { mutableStateOf(0L) }
     var chartDisplaySettings by remember(host) {
         mutableStateOf(loadChartDisplaySettings(host.pluginDataDir))
     }
@@ -253,20 +254,87 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
             }
     }
 
+    fun isCurrentChartRequest(requestId: Long, companyId: Int, interval: String): Boolean =
+        requestId == chartRequestSequence &&
+            state.selectedCompanyId == companyId &&
+            state.selectedInterval == interval
+
     fun reloadKline() {
+        val companyId = state.selectedCompanyId ?: return
+        val interval = state.selectedInterval
+        val requestId = chartRequestSequence + 1
+        chartRequestSequence = requestId
+        state = state.copy(
+            loading = true,
+            kline = emptyList(),
+            availableShares = emptyList(),
+            chartSegmentStart = null,
+            chartHasMore = false,
+            chartLoadingMore = false,
+            lastError = null
+        )
+        chartViewport = ChartViewport()
         scope.launch {
-            val companyId = state.selectedCompanyId ?: return@launch
-            runCatching { repository.fetchChartData(companyId, state.selectedInterval) }
+            runCatching { repository.fetchChartData(companyId, interval) }
                 .onSuccess { data ->
+                    if (!isCurrentChartRequest(requestId, companyId, interval)) return@onSuccess
                     state = state.copy(
                         loading = false,
-                        kline = data.kline,
-                        availableShares = data.availableShares,
+                        kline = mergeKlinePoints(emptyList(), data.kline),
+                        availableShares = mergeAvailableShares(emptyList(), data.availableShares),
+                        chartSegmentStart = data.segmentStart,
+                        chartHasMore = data.hasMore && data.segmentStart != null,
+                        chartLoadingMore = false,
                         lastError = null
                     )
-                    chartViewport = defaultChartViewport(data.kline, state.selectedInterval)
                 }
-                .onFailure { error -> state = state.copy(loading = false, lastError = error.message ?: "K线加载失败") }
+                .onFailure { error ->
+                    if (isCurrentChartRequest(requestId, companyId, interval)) {
+                        state = state.copy(loading = false, lastError = error.message ?: "K线加载失败")
+                    }
+                }
+        }
+    }
+
+    fun loadOlderChartSegment() {
+        if (state.chartLoadingMore || !state.chartHasMore) return
+        val companyId = state.selectedCompanyId ?: return
+        val interval = state.selectedInterval
+        val before = state.chartSegmentStart ?: return
+        val requestId = chartRequestSequence
+        state = state.copy(chartLoadingMore = true)
+        scope.launch {
+            runCatching { repository.fetchChartData(companyId, interval, before) }
+                .onSuccess { data ->
+                    if (!isCurrentChartRequest(requestId, companyId, interval)) return@onSuccess
+                    val oldKline = state.kline
+                    val mergedKline = mergeKlinePoints(oldKline, data.kline)
+                    val oldFirstTime = oldKline.firstOrNull()?.time
+                    val prependedCount = if (oldFirstTime == null) 0 else
+                        mergedKline.count { it.time != null && it.time < oldFirstTime }
+                    chartViewport = viewportAfterPrepend(
+                        chartViewport,
+                        oldKline.size,
+                        mergedKline.size,
+                        prependedCount
+                    )
+                    state = state.copy(
+                        kline = mergedKline,
+                        availableShares = mergeAvailableShares(state.availableShares, data.availableShares),
+                        chartSegmentStart = data.segmentStart,
+                        chartHasMore = data.hasMore && data.segmentStart != null,
+                        chartLoadingMore = false,
+                        lastError = null
+                    )
+                }
+                .onFailure { error ->
+                    if (isCurrentChartRequest(requestId, companyId, interval)) {
+                        state = state.copy(
+                            chartLoadingMore = false,
+                            lastError = error.message ?: "加载更早 K 线失败"
+                        )
+                    }
+                }
         }
     }
 
@@ -282,35 +350,49 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     }
 
     fun refreshAll() {
+        val requestId = chartRequestSequence + 1
+        chartRequestSequence = requestId
+        val interval = state.selectedInterval
+        state = state.copy(
+            loading = true,
+            lastError = null,
+            kline = emptyList(),
+            availableShares = emptyList(),
+            chartSegmentStart = null,
+            chartHasMore = false,
+            chartLoadingMore = false
+        )
+        chartViewport = ChartViewport()
         scope.launch {
-            state = state.copy(loading = true, lastError = null)
-            runCatching {
+            try {
                 val companies = repository.fetchCompanies().filter { it.latestPrice != null }
+                if (requestId != chartRequestSequence) return@launch
                 val selected = state.selectedCompanyId
                     ?.takeIf { id -> companies.any { it.id == id } }
                     ?: companies.firstOrNull { it.latestPrice != 0.0 }?.id
                     ?: companies.firstOrNull()?.id
-                val chartData = selected?.let { repository.fetchChartData(it, state.selectedInterval) }
+                val chartData = selected?.let { repository.fetchChartData(it, interval) }
                     ?: StockMarketChartData(emptyList(), emptyList())
-                Triple(companies, chartData, repository.fetchHealth())
-            }.onSuccess { (companies, chartData, health) ->
-                val selectedId = state.selectedCompanyId?.takeIf { id -> companies.any { it.id == id } }
-                    ?: companies.firstOrNull { it.latestPrice != 0.0 }?.id
-                    ?: companies.firstOrNull()?.id
+                val health = repository.fetchHealth()
+                if (requestId != chartRequestSequence) return@launch
                 state = state.copy(
                     loading = false,
                     companies = companies,
-                    selectedCompanyId = selectedId,
-                    kline = chartData.kline,
-                    availableShares = chartData.availableShares,
+                    selectedCompanyId = selected,
+                    kline = mergeKlinePoints(emptyList(), chartData.kline),
+                    availableShares = mergeAvailableShares(emptyList(), chartData.availableShares),
+                    chartSegmentStart = chartData.segmentStart,
+                    chartHasMore = chartData.hasMore && chartData.segmentStart != null,
+                    chartLoadingMore = false,
                     health = health,
                     purchaseRecords = currentPlayer?.uuid?.let(purchaseStore::load).orEmpty(),
                     profitHistory = currentPlayer?.uuid?.let(profitStore::load).orEmpty(),
-                    liveInfo = state.liveInfo?.takeIf { it.name == companies.firstOrNull { company -> company.id == selectedId }?.name }
+                    liveInfo = state.liveInfo?.takeIf { it.name == companies.firstOrNull { company -> company.id == selected }?.name }
                 )
-                chartViewport = defaultChartViewport(chartData.kline, state.selectedInterval)
-            }.onFailure { error ->
-                state = state.copy(loading = false, lastError = error.message ?: "加载失败")
+            } catch (error: Exception) {
+                if (requestId == chartRequestSequence) {
+                    state = state.copy(loading = false, lastError = error.message ?: "加载失败")
+                }
             }
         }
     }
@@ -412,6 +494,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                         reloadKline()
                     }
                 )
+                if (state.chartLoadingMore) LinearProgressIndicator(Modifier.fillMaxWidth())
                 CandleChart(
                     points = state.kline,
                     availableShares = state.availableShares,
@@ -419,6 +502,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     viewportKey = "${state.selectedCompanyId}:${state.selectedInterval}",
                     viewport = chartViewport,
                     onViewportChange = { chartViewport = it },
+                    onReachStart = ::loadOlderChartSegment,
                     displaySettings = chartDisplaySettings,
                     onDisplaySettingsChange = ::updateChartDisplaySettings,
                     modifier = Modifier.fillMaxWidth().height(330.dp)
@@ -429,6 +513,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     viewportKey = "${state.selectedCompanyId}:${state.selectedInterval}",
                     viewport = chartViewport,
                     onViewportChange = { chartViewport = it },
+                    onReachStart = ::loadOlderChartSegment,
                     modifier = Modifier.fillMaxWidth().height(150.dp)
                 )
                 TradePanel(
@@ -1487,6 +1572,7 @@ private fun CandleChart(
     viewportKey: String,
     viewport: ChartViewport,
     onViewportChange: (ChartViewport) -> Unit,
+    onReachStart: () -> Unit,
     displaySettings: ChartDisplaySettings,
     onDisplaySettingsChange: (ChartDisplaySettings) -> Unit,
     modifier: Modifier = Modifier
@@ -1584,6 +1670,11 @@ private fun CandleChart(
                                         (((lastPosition.x - 6.dp.toPx()) / (plotRight - 6.dp.toPx())) * (count - 1))
                                             .toInt().coerceIn(0, count - 1)
                                     onViewportChange(gestureViewport.copy(selectedIndex = range.first + localIndex))
+                                }
+                                if ((transformed || abs(totalMovement.x) >= viewConfiguration.touchSlop) &&
+                                    chartVisibleRange(points.size, gestureViewport.zoom, gestureViewport.pan).first == 0
+                                ) {
+                                    onReachStart()
                                 }
                             }
                         }
@@ -1773,6 +1864,7 @@ private fun AvailableSharesChart(
     viewportKey: String,
     viewport: ChartViewport,
     onViewportChange: (ChartViewport) -> Unit,
+    onReachStart: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = MaterialTheme.colorScheme
@@ -1837,6 +1929,11 @@ private fun AvailableSharesChart(
                                         (((lastPosition.x - plotLeft) / (plotRight - plotLeft)) * (count - 1))
                                             .toInt().coerceIn(0, count - 1)
                                     onViewportChange(gestureViewport.copy(selectedIndex = range.first + localIndex))
+                                }
+                                if ((transformed || abs(totalMovement.x) >= viewConfiguration.touchSlop) &&
+                                    chartVisibleRange(kline.size, gestureViewport.zoom, gestureViewport.pan).first == 0
+                                ) {
+                                    onReachStart()
                                 }
                             }
                         }
@@ -2076,28 +2173,50 @@ private fun pnlColor(value: Double?): Color = when {
     else -> STOCK_DOWN
 }
 
-private fun defaultChartViewport(points: List<StockKlinePoint>, interval: String): ChartViewport {
-    val size = points.size
-    if (size <= 2) return ChartViewport()
-    val targetMillis = when (interval) {
-        "15m" -> 24L * 60 * 60 * 1000
-        "1h" -> 7L * 24 * 60 * 60 * 1000
-        "4h" -> 30L * 24 * 60 * 60 * 1000
-        else -> 90L * 24 * 60 * 60 * 1000
-    }
-    val latest = points.lastOrNull()?.time
-    val firstVisibleIndex = if (latest == null) -1 else points.indexOfFirst { point ->
-        point.time?.let { it >= latest - targetMillis } == true
-    }
-    val fallbackVisible = when (interval) {
-        "15m" -> 96
-        "1h" -> 168
-        "4h" -> 180
-        else -> 90
-    }
-    val visible = (if (firstVisibleIndex >= 0) size - firstVisibleIndex else fallbackVisible).coerceIn(2, size)
-    val zoom = (size.toFloat() / visible).coerceAtLeast(1f)
-    return ChartViewport(zoom = zoom, pan = (size - visible) / 2f)
+private fun mergeKlinePoints(
+    existing: List<StockKlinePoint>,
+    incoming: List<StockKlinePoint>
+): List<StockKlinePoint> {
+    val pointsByTime = linkedMapOf<Long, StockKlinePoint>()
+    (existing + incoming).forEach { point -> point.time?.let { pointsByTime[it] = point } }
+    return pointsByTime.values.sortedBy { it.time }
+}
+
+private fun mergeAvailableShares(
+    existing: List<StockAvailableSharesPoint>,
+    incoming: List<StockAvailableSharesPoint>
+): List<StockAvailableSharesPoint> {
+    val pointsByTime = linkedMapOf<Long, StockAvailableSharesPoint>()
+    (existing + incoming).forEach { pointsByTime[it.time] = it }
+    return pointsByTime.values.sortedBy { it.time }
+}
+
+private fun viewportAfterPrepend(
+    viewport: ChartViewport,
+    oldSize: Int,
+    newSize: Int,
+    prependedCount: Int
+): ChartViewport {
+    if (oldSize <= 1) return ChartViewport()
+    if (newSize <= oldSize || prependedCount <= 0) return viewport
+
+    val zoom = viewport.zoom.coerceAtLeast(1f)
+    val oldVisibleCount = ceil(oldSize / zoom).toInt().coerceIn(2, oldSize)
+    val oldHalfSpan = (oldVisibleCount - 1) / 2f
+    val oldCenter = ((oldSize - 1) / 2f + viewport.pan)
+        .coerceIn(oldHalfSpan, oldSize - 1 - oldHalfSpan)
+    val newZoom = (newSize.toFloat() / oldVisibleCount)
+        .coerceIn(1f, max(1f, newSize / 5f))
+    val newVisibleCount = ceil(newSize / newZoom).toInt().coerceIn(2, newSize)
+    val newHalfSpan = (newVisibleCount - 1) / 2f
+    val newCenter = (oldCenter + prependedCount)
+        .coerceIn(newHalfSpan, newSize - 1 - newHalfSpan)
+
+    return viewport.copy(
+        zoom = newZoom,
+        pan = newCenter - (newSize - 1) / 2f,
+        selectedIndex = viewport.selectedIndex?.plus(prependedCount)
+    )
 }
 
 private val STOCK_UP = Color(0xFF16A36A)

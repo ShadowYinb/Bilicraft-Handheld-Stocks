@@ -19,7 +19,10 @@ data class StockCompany(
 data class StockKlineResponse(
     @SerialName("company_id") val companyId: Int,
     val interval: String,
-    val data: List<StockKlinePoint>
+    val data: List<StockKlinePoint>,
+    @SerialName("has_more") val hasMore: Boolean = false,
+    @SerialName("oldest_time") val oldestTime: Long? = null,
+    @SerialName("segment_start") val segmentStart: String? = null
 )
 
 @Serializable
@@ -37,7 +40,8 @@ data class StockKlinePoint(
 data class StockAvailableSharesResponse(
     @SerialName("company_id") val companyId: Int,
     val interval: String,
-    val data: List<StockAvailableSharesPoint>
+    val data: List<StockAvailableSharesPoint>,
+    @SerialName("segment_start") val segmentStart: String? = null
 )
 
 @Serializable
@@ -49,7 +53,9 @@ data class StockAvailableSharesPoint(
 
 data class StockMarketChartData(
     val kline: List<StockKlinePoint>,
-    val availableShares: List<StockAvailableSharesPoint>
+    val availableShares: List<StockAvailableSharesPoint>,
+    val segmentStart: String? = null,
+    val hasMore: Boolean = false
 )
 
 @Serializable
@@ -83,6 +89,9 @@ data class StockUiState(
     val selectedInterval: String = "15m",
     val kline: List<StockKlinePoint> = emptyList(),
     val availableShares: List<StockAvailableSharesPoint> = emptyList(),
+    val chartSegmentStart: String? = null,
+    val chartHasMore: Boolean = false,
+    val chartLoadingMore: Boolean = false,
     val health: StockHealthResponse? = null,
     val walletBalance: Double? = null,
     val liveInfo: LiveStockInfo? = null,
